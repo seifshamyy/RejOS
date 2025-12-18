@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rejection OS // Pro</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Supabase JS -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- App Logic (Loaded before Alpine) -->
+    <script>
+        // CONFIGURATION
+        var APP_CONFIG = {
+            SUPABASE_URL: 'https://whmbrguzumyatnslzfsq.supabase.co',
+            SUPABASE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobWJyZ3V6dW15YXRuc2x6ZnNxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTM1MTY4OSwiZXhwIjoyMDY0OTI3Njg5fQ.h-YbToBRx8WTW5KCk2IAYnmuhob3oiARGsnn61HwYQc',
+            OPENAI_KEY: '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'
+        };
+
+        // Initialize Supabase safely
+        var sbClient = null;
+        
+        function initSupabase() {
+            if (typeof window.supabase !== 'undefined' && !sbClient) {
+                try {
+                    sbClient = window.supabase.createClient(APP_CONFIG.SUPABASE_URL, APP_CONFIG.SUPABASE_KEY);
+                } catch (e) {
+                    console.error("Supabase init error:", e);
+                }
+            }
+            return sbClient;
+        }
+
+        // Main App Component
+        function proApp() {
+            return {
+                // UI State
+                currentTab: 'dashboard',
+                mobileMenuOpen: false,
+                loading: true,
+                aiLoading: false,
+                
+                // Data State
+                todayDate: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+                stats: { total_points: 0, action_count: 0, rejection_count: 0 },
+                actions: [],
+                logs: [], // Recent logs for dashboard
+                historyLogs: [], // Detailed logs for history tab
+                lifetimePoints: 0,
+                
+                // History Filters
+                selectedDate: null, // Specific day selected
+                filterType: 'all', // 'all', 'rejection', 'meeting'
+                
+                // Leveling
+                level: 1,
+                levelTitle: 'Novice Rejectee',
+                xpProgress: 0,
+
+                // AI Coach (New Structure)
+                aiAnalysis: null, // { status: '', headline: '', directive: '' }
+                
+                // Simulator State
+                simInput: '',
+                simLoading: false,
+                simulationMessages: [
+                    { id: 1, role: 'system', text: "I'm busy. What do you want? Make it quick." }
+                ],
+
+                // Calendar State
+                calendar: {
+                    viewDate: new Date(), // Tracks which month we are viewing
+                    days: [], // Generated grid days
+                    stats: {}, // Map of 'YYYY-MM-DD' -> stats object
+                    loading: false
+                },
+                
+                // Toast
+                toast: { visible: false, message: '' },
+                
+                // Chart Instance
+                chartInstance: null,
+
+                async initApp() {
+                    // Ensure supabase is ready
+                    if (!sbClient) initSupabase();
+                    
+                    if (!sbClient) {
+                        console.error("Supabase client not available.");
+                        this.loading = false;
+                        this.aiAnalysis = { status: 'OFFLINE', headline: 'Database Connection Failed', directive: 'Check your internet connection and reload.' };
+                        return;
+                    }
+                    
+                    console.log("Initializing Pro Dashboard...");
+                    try {
+                        await Promise.all([
+                            this.fetchActions(),
+                            this.fetchStats(),
+                            this.fetchLogs(),
+                            this.fetchWeeklyData(),
+                            this.refreshCalendar() // Load calendar data initially
+                        ]);
+                        
+                        this.calculateLevel();
+                        
+                        // Generate advice if we have data, otherwise welcome message
+                        if (this.stats.total_points > 0 || this.logs.length > 0) {
+                            this.generateAiAdvice();
+                        } else {
+                            this.aiAnalysis = {
+                                status: 'WAITING',
+                                headline: 'System Initialized',
+                                directive: 'No activity detected. Execute a protocol from the grid below to begin data collection.'
+                            };
+                        }
+                    } catch (err) {
+                        console.error("Initialization error:", err);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                // --- DATA FETCHING ---
+                
+                async fetchActions() {
+                    if (!sbClient) return;
+                    const { data } = await sbClient.from('actions_ref').select('*').order('base_points', { ascending: true });
+                    if (data) this.actions = data;
+                },
+
+                async fetchStats() {
+                    if (!sbClient) return;
+                    const today = new Date().toISOString().split('T')[0];
+                    const { data } = await sbClient.from('daily_stats').select('*').eq('date', today).single();
+                    if (data) this.stats = data;
+                    
+                    // Lifetime points approximation
+                    const { data: allStats } = await sbClient.from('daily_stats').select('total_points');
+                    if (allStats) {
+                        this.lifetimePoints = allStats.reduce((sum, day) => sum + day.total_points, 0);
+                    }
+                },
+
+                async fetchLogs() {
+                    if (!sbClient) return;
+                    const { data } = await sbClient
+                        .from('logs')
+                        .select('*, actions_ref(name, icon)')
+                        .order('created_at', { ascending: false })
+                        .limit(20);
+                    if (data) this.logs = data;
+                },
+
+                // --- PROTOCOL UPDATER (ADMIN) ---
+                async updateProtocols() {
+                    if (!confirm('This will update your Action Menu to V2 rules (Lower points, Facebook instead of LinkedIn, Inner Circle added). Continue?')) return;
+                    
+                    this.loading = true;
+                    if (!sbClient) return;
+
+                    try {
+                        // 1. Update Existing Actions (Map old names to new)
+                        // Cold Call -> 10 pts
+                        await sbClient.from('actions_ref').update({ base_points: 10 }).eq('name', 'Cold Call');
+                        
+                        // Hard Rejection -> 15 pts
+                        await sbClient.from('actions_ref').update({ base_points: 15 }).ilike('name', '%Rejection%');
+                        
+                        // LinkedIn -> Facebook (5 pts)
+                        await sbClient.from('actions_ref').update({ name: 'Facebook Post (Company)', icon: '📘', base_points: 5 }).ilike('name', '%LinkedIn%');
+                        
+                        // Cold Email -> Direct Message (3 pts)
+                        await sbClient.from('actions_ref').update({ name: 'Direct Message (DM)', icon: '💬', base_points: 3 }).ilike('name', '%Cold Email%');
+                        
+                        // Follow-up -> 3 pts
+                        await sbClient.from('actions_ref').update({ base_points: 3 }).ilike('name', '%Follow-up%');
+
+                        // Meeting -> 30 pts
+                        await sbClient.from('actions_ref').update({ base_points: 30 }).ilike('name', '%Meeting%');
+
+                        // 2. Insert New Actions if they don't exist
+                        const { data: existing } = await sbClient.from('actions_ref').select('name');
+                        const names = existing ? existing.map(d => d.name) : [];
+
+                        // Inner Circle
+                        if (!names.some(n => n.includes('Inner Circle'))) {
+                            await sbClient.from('actions_ref').insert({ 
+                                name: 'Inner Circle Outreach', 
+                                base_points: 30, 
+                                icon: '🤝', 
+                                category: 'outreach' 
+                            });
+                        }
+
+                        // Personal Post
+                        if (!names.some(n => n.includes('Personal Post'))) {
+                            await sbClient.from('actions_ref').insert({ 
+                                name: 'Personal Post (My Name)', 
+                                base_points: 30, 
+                                icon: '🙋‍♂️', 
+                                category: 'social' 
+                            });
+                        }
+
+                        this.showToast('Protocols Updated to V2.');
+                        await this.fetchActions();
+
+                    } catch (e) {
+                        console.error(e);
+                        this.showToast('Error updating protocols.');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                // --- CALENDAR LOGIC ---
+
+                async refreshCalendar() {
+                    this.calendar.loading = true;
+                    const year = this.calendar.viewDate.getFullYear();
+                    const month = this.calendar.viewDate.getMonth();
+
+                    // 1. Generate Days Grid
+                    const firstDay = new Date(year, month, 1);
+                    const lastDay = new Date(year, month + 1, 0);
+                    const daysInMonth = lastDay.getDate();
+                    const startDayOfWeek = firstDay.getDay(); // 0 (Sun) - 6 (Sat)
+                    
+                    let grid = [];
+                    // Padding for previous month
+                    for (let i = 0; i < startDayOfWeek; i++) {
+                        grid.push({ day: '', empty: true });
+                    }
+                    // Actual days
+                    for (let i = 1; i <= daysInMonth; i++) {
+                        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+                        grid.push({ day: i, empty: false, dateStr: dateStr });
+                    }
+                    this.calendar.days = grid;
+
+                    // 2. Fetch Stats & Logs for this Month
+                    if (sbClient) {
+                        const startStr = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+                        const endStr = `${year}-${String(month + 1).padStart(2, '0')}-${daysInMonth}`;
+                        // Add one day to endStr for log fetching to ensure we get the full last day
+                        const nextDay = new Date(year, month, daysInMonth + 1);
+                        const logsEndStr = nextDay.toISOString().split('T')[0];
+
+                        // Fetch Stats (Map)
+                        const { data: statsData } = await sbClient
+                            .from('daily_stats')
+                            .select('date, total_points, rejection_count')
+                            .gte('date', startStr)
+                            .lte('date', endStr);
+                        
+                        this.calendar.stats = {};
+                        if (statsData) {
+                            statsData.forEach(row => {
+                                this.calendar.stats[row.date] = row;
+                            });
+                        }
+
+                        // Fetch Logs (List)
+                        const { data: logsData } = await sbClient
+                            .from('logs')
+                            .select('*, actions_ref(name, icon, base_points)')
+                            .gte('created_at', startStr)
+                            .lt('created_at', logsEndStr)
+                            .order('created_at', { ascending: false });
+                        
+                        if (logsData) {
+                            this.historyLogs = logsData;
+                        }
+                    }
+                    this.calendar.loading = false;
+                },
+
+                changeMonth(offset) {
+                    const newDate = new Date(this.calendar.viewDate);
+                    newDate.setMonth(newDate.getMonth() + offset);
+                    this.calendar.viewDate = newDate;
+                    this.selectedDate = null; // Clear selection on month change
+                    this.refreshCalendar();
+                },
+
+                selectDay(dateStr) {
+                    if (this.selectedDate === dateStr) {
+                        this.selectedDate = null; // Toggle off
+                    } else {
+                        this.selectedDate = dateStr;
+                    }
+                },
+                
+                clearDateSelection() {
+                    this.selectedDate = null;
+                },
+
+                getCalendarTitle() {
+                    return this.calendar.viewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+                },
+
+                getDayClass(dateStr) {
+                    let baseClass = 'cursor-pointer transition-all duration-200 border-2 ';
+                    
+                    // Selected State
+                    if (this.selectedDate === dateStr) {
+                        baseClass += 'ring-2 ring-offset-2 ring-gray-900 z-10 scale-105 ';
+                    } else {
+                        baseClass += 'hover:scale-105 ';
+                    }
+
+                    const stat = this.calendar.stats[dateStr];
+                    if (!stat || stat.total_points === 0) return baseClass + 'bg-white text-gray-400 hover:bg-gray-50 border-transparent';
+                    
+                    const p = stat.total_points;
+                    if (p >= 100) return baseClass + 'bg-brand-600 text-white shadow-md border-transparent';
+                    if (p >= 50) return baseClass + 'bg-brand-400 text-white border-brand-500';
+                    if (p >= 20) return baseClass + 'bg-brand-200 text-brand-900 border-brand-300';
+                    return baseClass + 'bg-brand-50 text-brand-700 border-brand-200';
+                },
+
+                // --- HISTORY LIST LOGIC ---
+                
+                getFilteredHistory() {
+                    let filtered = this.historyLogs;
+
+                    // 1. Date Filter
+                    if (this.selectedDate) {
+                        filtered = filtered.filter(log => log.created_at.startsWith(this.selectedDate));
+                    }
+
+                    // 2. Type Filter
+                    if (this.filterType === 'rejection') {
+                        filtered = filtered.filter(log => log.outcome === 'rejection');
+                    } else if (this.filterType === 'meeting') {
+                        filtered = filtered.filter(log => log.outcome === 'meeting');
+                    } else if (this.filterType === 'wins') {
+                         filtered = filtered.filter(log => log.outcome === 'meeting' || log.outcome === 'rejection');
+                    }
+
+                    return filtered;
+                },
+
+                async deleteLog(logId) {
+                    if (!confirm('Are you sure you want to delete this log? This will remove points.')) return;
+                    
+                    if (!sbClient) return;
+                    
+                    const { error } = await sbClient.from('logs').delete().eq('id', logId);
+
+                    if (!error) {
+                        this.showToast('Log entry deleted.');
+                        await this.fetchStats();
+                        await this.fetchLogs();
+                        await this.refreshCalendar();
+                        this.updateChart();
+                    } else {
+                        console.error(error);
+                        this.showToast('Error deleting log.');
+                    }
+                },
+
+                async resetData() {
+                    if (!confirm('DANGER: This will wipe ALL your history, points, and stats. This cannot be undone. Are you sure?')) return;
+                    if (!confirm('Really? You are about to lose all progress.')) return;
+
+                    this.loading = true;
+
+                    if (!sbClient) return;
+
+                    try {
+                        // Delete all logs
+                        await sbClient.from('logs').delete().not('id', 'is', null);
+                        // Delete all stats
+                        await sbClient.from('daily_stats').delete().not('date', 'is', null);
+
+                        this.showToast('System Reset Complete.');
+                        
+                        // Reset local state
+                        this.stats = { total_points: 0, action_count: 0, rejection_count: 0 };
+                        this.logs = [];
+                        this.historyLogs = [];
+                        this.lifetimePoints = 0;
+                        this.calculateLevel();
+                        this.refreshCalendar();
+                        this.fetchWeeklyData();
+                        this.aiAnalysis = { status: 'RESET', headline: 'Clean Slate', directive: 'System purged. Begin phase 1.' };
+                        
+                    } catch (err) {
+                        console.error("Reset failed", err);
+                        this.showToast('Reset failed. Check console.');
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+
+                // --- MAIN LOGIC ---
+
+                calculateLevel() {
+                    const rawLevel = Math.sqrt(this.lifetimePoints / 50);
+                    this.level = Math.floor(rawLevel) || 1;
+                    
+                    const currentLevelPoints = Math.pow(this.level, 2) * 50;
+                    const nextLevelPoints = Math.pow(this.level + 1, 2) * 50;
+                    const range = nextLevelPoints - currentLevelPoints;
+                    const progress = this.lifetimePoints - currentLevelPoints;
+                    this.xpProgress = Math.min((progress / range) * 100, 100);
+
+                    const titles = ["Novice", "Initiate", "Grinder", "Hustler", "Rejector", "Fearless", "Machine", "Legend", "Godlike"];
+                    this.levelTitle = titles[Math.min(this.level - 1, titles.length - 1)] || "Unknown Entity";
+                },
+
+                async logAction(action) {
+                    if (!sbClient) return;
+                    let outcome = 'pending';
+                    if (action.name.toLowerCase().includes('rejection')) outcome = 'rejection';
+                    if (action.name.toLowerCase().includes('meeting')) outcome = 'meeting';
+
+                    const { error } = await sbClient.from('logs').insert({
+                        action_id: action.id,
+                        points_awarded: action.base_points,
+                        outcome: outcome
+                    });
+
+                    if (!error) {
+                        this.showToast(`Protocol Executed: ${action.name}`);
+                        await this.fetchStats();
+                        await this.fetchLogs();
+                        await this.refreshCalendar(); // Update calendar if viewing current month
+                        this.calculateLevel(); 
+                        this.updateChart(); 
+                        
+                        // Regenerate advice after action to see if user complied
+                        this.generateAiAdvice(); 
+                    }
+                },
+
+                // --- CHARTING ---
+
+                async fetchWeeklyData() {
+                    if (!sbClient) return;
+                    
+                    // 1. Calculate Date Range (Last 7 Days)
+                    const end = new Date();
+                    const start = new Date();
+                    start.setDate(end.getDate() - 6); // 7 days total including today
+
+                    const labels = [];
+                    const dateKeys = [];
+                    
+                    // 2. Generate the empty skeleton
+                    for(let i=0; i<7; i++) {
+                        const d = new Date(start);
+                        d.setDate(start.getDate() + i);
+                        labels.push(d.toLocaleDateString('en-US', { weekday: 'short' }));
+                        dateKeys.push(d.toISOString().split('T')[0]);
+                    }
+
+                    // 3. Fetch Data
+                    const { data } = await sbClient
+                        .from('daily_stats')
+                        .select('date, total_points')
+                        .gte('date', dateKeys[0])
+                        .lte('date', dateKeys[6]) // Explicit bounds
+                        .order('date', { ascending: true });
+                        
+                    // 4. Map DB results to the skeleton
+                    const dataMap = {};
+                    if (data) {
+                        data.forEach(item => {
+                            dataMap[item.date] = item.total_points;
+                        });
+                    }
+
+                    // 5. Fill array (0 if missing)
+                    const chartData = dateKeys.map(dateKey => dataMap[dateKey] || 0);
+                    
+                    this.initChart(labels, chartData);
+                },
+
+                initChart(labels, data) {
+                    const ctx = document.getElementById('weeklyChart');
+                    if(!ctx) return;
+                    
+                    if (this.chartInstance) this.chartInstance.destroy();
+
+                    this.chartInstance = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [{
+                                label: 'Points',
+                                data: data,
+                                backgroundColor: '#3b82f6',
+                                borderRadius: 4,
+                                hoverBackgroundColor: '#2563eb'
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false }
+                            },
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    grid: { display: true, borderDash: [4, 4] }
+                                },
+                                x: {
+                                    grid: { display: false }
+                                }
+                            }
+                        }
+                    });
+                },
+                
+                updateChart() {
+                    if(this.chartInstance && this.chartInstance.data.datasets[0].data.length > 0) {
+                        const len = this.chartInstance.data.datasets[0].data.length;
+                        this.chartInstance.data.datasets[0].data[len-1] = this.stats.total_points;
+                        this.chartInstance.update();
+                    }
+                },
+
+                // --- AI FEATURES ---
+
+                async generateAiAdvice() {
+                    this.aiLoading = true;
+                    
+                    // 1. Gather Deep Context
+                    // Get last 10 logs to see WHAT user is doing
+                    const recentLogs = this.logs.slice(0, 10).map(l => l.actions_ref.name).join(', ');
+                    
+                    const prompt = `
+                        You are a ruthless, data-driven sales director. Your goal is to break the user's fear of rejection.
+                        
+                        USER METRICS (Last 24h):
+                        - Total Points: ${this.stats.total_points} (Target: 100)
+                        - Total Actions: ${this.stats.action_count}
+                        - Rejections: ${this.stats.rejection_count}
+                        - Recent Activity Stream: [${recentLogs || "No activity yet"}]
+                        
+                        ANALYSIS RULES:
+                        1. If points < 20: They are procrastinating. Status: LETHARGIC. Roast them.
+                        2. If Rejections == 0 but points > 50: They are playing it safe (avoiding hard asks). Status: COWARDLY. Call them out.
+                        3. If Rejections > 2: They are seeking pain. Status: LEGENDARY. Praise them.
+                        4. If mostly "Emails/DMs" and no "Calls": Accuse them of hiding behind the screen. Status: WEAK.
+                        5. If they just did a hard rejection, Status: SAVAGE.
+                        
+                        OUTPUT FORMAT (JSON ONLY):
+                        {
+                            "status": "One word uppercase status (e.g. CRITICAL, WARMING_UP, ON_FIRE, COWARDLY, LEGENDARY)",
+                            "headline": "Short, punchy 3-5 word summary of their current state",
+                            "directive": "Specific tactical advice. Tell them exactly what to do next to fix the metric that looks weakest."
+                        }
+                    `;
+                    
+                    await this.callOpenAI(prompt, (text) => {
+                        try {
+                            // Strip markdown if present
+                            const cleanText = text.replace(/```json/g, '').replace(/```/g, '');
+                            this.aiAnalysis = JSON.parse(cleanText);
+                        } catch (e) {
+                            console.error("AI JSON Parse Error", e);
+                            this.aiAnalysis = {
+                                status: 'ERROR',
+                                headline: 'Data Stream Corrupted',
+                                directive: text // Fallback to raw text
+                            };
+                        }
+                    });
+                    this.aiLoading = false;
+                },
+
+                async sendSimulationMessage() {
+                    const userText = this.simInput;
+                    this.simInput = '';
+                    this.simulationMessages.push({ id: Date.now(), role: 'user', text: userText });
+                    this.simLoading = true;
+                    
+                    this.$nextTick(() => {
+                        const container = document.getElementById('chatContainer');
+                        if (container) container.scrollTop = container.scrollHeight;
+                    });
+
+                    const prompt = `
+                        Role: A skeptical, busy, arrogant business prospect who gets cold pitched constantly.
+                        Goal: Reject the user. Be rude. Interrupt. Only agree if they provide massive, undeniable value immediately.
+                        Personality: Impatient, blunt, hard to impress.
+                        
+                        History: ${JSON.stringify(this.simulationMessages.map(m => m.text))}
+                        User just said: "${userText}"
+                        
+                        Reply as the prospect (max 2 sentences). Do not be helpful. Be a challenge.
+                    `;
+
+                    await this.callOpenAI(prompt, (text) => {
+                        this.simulationMessages.push({ id: Date.now() + 1, role: 'system', text: text });
+                        this.$nextTick(() => {
+                            const container = document.getElementById('chatContainer');
+                            if (container) container.scrollTop = container.scrollHeight;
+                        });
+                    });
+                    
+                    this.simLoading = false;
+                },
+
+                resetSimulation() {
+                    this.simulationMessages = [{ id: 1, role: 'system', text: "I'm busy. What do you want? Make it quick." }];
+                },
+
+                async callOpenAI(prompt, callback) {
+                    try {
+                        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${APP_CONFIG.OPENAI_KEY}`
+                            },
+                            body: JSON.stringify({
+                                model: "gpt-4o",
+                                messages: [{ role: "user", content: prompt }],
+                                max_tokens: 150,
+                                temperature: 0.8 // High temp for more "personality"
+                            })
+                        });
+                        const data = await response.json();
+                        if (data.choices) callback(data.choices[0].message.content);
+                    } catch (e) {
+                        console.error(e);
+                        callback("AI Offline. Focus on the work.");
+                    }
+                },
+
+                // --- UTILS ---
+                showToast(msg) {
+                    this.toast.message = msg;
+                    this.toast.visible = true;
+                    setTimeout(() => this.toast.visible = false, 3000);
+                },
+
+                formatTime(ts) {
+                    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                }
+            }
+        }
+    </script>
+
+    <!-- Alpine.js (Loaded AFTER script definition) -->
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        [x-cloak] { display: none !important; }
+        
+        /* Smooth transitions */
+        .transition-all-300 { transition: all 0.3s ease-in-out; }
+        
+        /* Calendar Grid Aspect Ratio */
+        .calendar-day {
+            aspect-ratio: 1 / 1;
+        }
+    </style>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#eff6ff',
+                            100: '#dbeafe',
+                            200: '#bfdbfe',
+                            300: '#93c5fd',
+                            400: '#60a5fa',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                            800: '#1e40af',
+                            900: '#1e3a8a',
+                        },
+                        danger: {
+                            500: '#ef4444',
+                            600: '#dc2626'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-50 text-gray-900 h-screen overflow-hidden flex" x-data="proApp()" x-init="initApp()">
+
+    <!-- Sidebar (Desktop) -->
+    <aside class="hidden md:flex flex-col w-64 bg-white border-r border-gray-200 h-full">
+        <div class="p-6 border-b border-gray-100">
+            <div class="flex items-center gap-2 text-brand-600 font-bold text-xl tracking-tight">
+                <i class="ph-fill ph-target text-2xl"></i>
+                RejectionOS
+            </div>
+            <div class="text-xs text-gray-400 mt-1 uppercase tracking-wider font-semibold">Pro Edition</div>
+        </div>
+
+        <nav class="flex-1 p-4 space-y-1">
+            <button @click="currentTab = 'dashboard'" :class="currentTab === 'dashboard' ? 'bg-brand-50 text-brand-600' : 'text-gray-600 hover:bg-gray-50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors">
+                <i class="ph ph-squares-four text-lg"></i> Dashboard
+            </button>
+            <button @click="currentTab = 'practice'" :class="currentTab === 'practice' ? 'bg-brand-50 text-brand-600' : 'text-gray-600 hover:bg-gray-50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors">
+                <i class="ph ph-robot text-lg"></i> AI Simulator
+            </button>
+            <button @click="currentTab = 'history'" :class="currentTab === 'history' ? 'bg-brand-50 text-brand-600' : 'text-gray-600 hover:bg-gray-50'" class="w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors">
+                <i class="ph ph-calendar text-lg"></i> History
+            </button>
+        </nav>
+        
+        <!-- Admin Buttons -->
+        <div class="p-4 space-y-2 border-t border-gray-100">
+             <button @click="updateProtocols()" class="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold text-brand-600 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-lg transition-colors">
+                <i class="ph-bold ph-arrows-clockwise"></i>
+                Update Protocols
+            </button>
+             <button @click="resetData()" class="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors">
+                <i class="ph-bold ph-trash"></i>
+                HARD RESET
+            </button>
+        </div>
+
+        <!-- User Profile / Level -->
+        <div class="p-4 bg-gray-50/50">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-bold uppercase text-gray-500">Level <span x-text="level"></span></span>
+                <span class="text-xs font-bold text-brand-600"><span x-text="lifetimePoints"></span> XP</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-2">
+                <div class="bg-brand-600 h-2 rounded-full transition-all duration-1000" :style="`width: ${xpProgress}%`"></div>
+            </div>
+            <div class="mt-2 text-xs text-gray-500 truncate" x-text="levelTitle"></div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col h-full overflow-hidden relative">
+        
+        <!-- Mobile Header -->
+        <header class="md:hidden flex items-center justify-between p-4 bg-white border-b border-gray-200 z-20">
+            <div class="font-bold text-lg text-brand-600">RejectionOS</div>
+            <button @click="mobileMenuOpen = !mobileMenuOpen" class="p-2 text-gray-600">
+                <i class="ph ph-list text-2xl"></i>
+            </button>
+        </header>
+
+        <!-- Mobile Menu Overlay -->
+        <div x-show="mobileMenuOpen" class="absolute inset-0 z-30 bg-white p-4 flex flex-col gap-4 md:hidden" x-transition>
+            <div class="flex justify-between items-center mb-6">
+                <span class="font-bold text-xl">Menu</span>
+                <button @click="mobileMenuOpen = false"><i class="ph ph-x text-2xl"></i></button>
+            </div>
+            <button @click="currentTab = 'dashboard'; mobileMenuOpen = false" class="p-4 bg-gray-50 rounded-lg text-left font-bold">Dashboard</button>
+            <button @click="currentTab = 'practice'; mobileMenuOpen = false" class="p-4 bg-gray-50 rounded-lg text-left font-bold">AI Simulator</button>
+            <button @click="currentTab = 'history'; mobileMenuOpen = false" class="p-4 bg-gray-50 rounded-lg text-left font-bold">History</button>
+            
+            <div class="mt-auto border-t border-gray-100 pt-4 space-y-2">
+                 <button @click="updateProtocols(); mobileMenuOpen = false" class="w-full p-4 text-brand-600 font-bold bg-brand-50 rounded-lg flex items-center justify-center gap-2">
+                    <i class="ph-bold ph-arrows-clockwise"></i> Update Protocols
+                </button>
+                 <button @click="resetData(); mobileMenuOpen = false" class="w-full p-4 text-red-600 font-bold bg-red-50 rounded-lg flex items-center justify-center gap-2">
+                    <i class="ph-bold ph-trash"></i> HARD RESET
+                </button>
+            </div>
+        </div>
+
+        <!-- Scrollable Content Area -->
+        <div class="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-8">
+            <div class="max-w-6xl mx-auto space-y-8">
+
+                <!-- DASHBOARD TAB -->
+                <div x-show="currentTab === 'dashboard'" class="space-y-8 animate-fade-in">
+                    
+                    <!-- Header -->
+                    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div>
+                            <h1 class="text-2xl md:text-3xl font-bold text-gray-900">Good Morning, Builder.</h1>
+                            <p class="text-gray-500 mt-1" x-text="todayDate"></p>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <button 
+                                @click="generateAiAdvice()" 
+                                class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 shadow-sm rounded-lg hover:bg-gray-50 transition text-sm font-medium text-gray-700"
+                                :disabled="aiLoading"
+                            >
+                                <i class="ph ph-lightning text-brand-500" :class="aiLoading ? 'animate-pulse' : ''"></i>
+                                <span x-text="aiLoading ? 'Analyzing...' : 'Refresh Intel'"></span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- AI TACTICAL ANALYSIS CARD -->
+                    <div class="bg-gray-900 rounded-xl p-1 text-white shadow-lg relative overflow-hidden group">
+                        <div class="absolute top-0 right-0 p-4 opacity-5"><i class="ph-fill ph-brain text-8xl"></i></div>
+                        
+                        <!-- Header Strip -->
+                        <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800 bg-gray-900/50 backdrop-blur-sm relative z-10">
+                            <div class="flex items-center gap-2">
+                                <div class="w-2 h-2 rounded-full animate-pulse" :class="aiAnalysis?.status === 'CRITICAL' || aiAnalysis?.status === 'LETHARGIC' ? 'bg-red-500' : 'bg-green-500'"></div>
+                                <span class="text-[10px] uppercase tracking-widest font-bold text-gray-400">Tactical Analysis</span>
+                            </div>
+                            <div class="text-[10px] font-mono text-gray-500">
+                                STATUS: <span class="text-white font-bold" x-text="aiAnalysis?.status || 'STANDBY'"></span>
+                            </div>
+                        </div>
+
+                        <!-- Content -->
+                        <div class="p-6 relative z-10">
+                            <template x-if="aiAnalysis && !aiLoading">
+                                <div>
+                                    <h3 class="text-xl md:text-2xl font-bold mb-2 text-white" x-text="aiAnalysis.headline"></h3>
+                                    <p class="text-gray-400 leading-relaxed font-mono text-sm border-l-2 border-brand-500 pl-3 py-1" x-text="aiAnalysis.directive"></p>
+                                </div>
+                            </template>
+                            
+                            <!-- Loading State -->
+                            <div x-show="aiLoading" class="flex flex-col items-center justify-center py-4 space-y-2">
+                                <i class="ph ph-circle-notch animate-spin text-2xl text-brand-500"></i>
+                                <span class="text-xs font-mono text-gray-500">Processing telemetry...</span>
+                            </div>
+
+                            <!-- Empty State -->
+                            <template x-if="!aiAnalysis && !aiLoading">
+                                <div class="text-gray-500 italic text-sm">System ready. Awaiting input.</div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- Stats Grid -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <!-- Score Card -->
+                        <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-between">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <div class="text-sm font-medium text-gray-500 uppercase tracking-wide">Daily Score</div>
+                                    <div class="text-4xl font-bold text-gray-900 mt-2" x-text="stats.total_points"></div>
+                                </div>
+                                <div class="p-3 bg-brand-50 rounded-lg text-brand-600">
+                                    <i class="ph-fill ph-trophy text-xl"></i>
+                                </div>
+                            </div>
+                            <div class="mt-4 w-full bg-gray-100 rounded-full h-1.5">
+                                <div class="bg-brand-500 h-1.5 rounded-full" :style="`width: ${Math.min((stats.total_points / 100) * 100, 100)}%`"></div>
+                            </div>
+                            <div class="mt-2 text-xs text-gray-500 flex justify-between">
+                                <span>Target: 100</span>
+                                <span x-text="`${Math.min(Math.round((stats.total_points / 100) * 100), 100)}%`"></span>
+                            </div>
+                        </div>
+
+                        <!-- Rejections Card -->
+                        <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-between">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <div class="text-sm font-medium text-gray-500 uppercase tracking-wide">Rejections</div>
+                                    <div class="text-4xl font-bold text-danger-600 mt-2" x-text="stats.rejection_count"></div>
+                                </div>
+                                <div class="p-3 bg-red-50 rounded-lg text-danger-600">
+                                    <i class="ph-fill ph-hand-palm text-xl"></i>
+                                </div>
+                            </div>
+                            <div class="mt-4 text-sm text-gray-600">
+                                <span class="font-medium text-gray-900">Success is a numbers game.</span>
+                                More No's = More Yes's.
+                            </div>
+                        </div>
+
+                        <!-- Streak/Action Card -->
+                        <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col justify-between">
+                             <div class="flex justify-between items-start">
+                                <div>
+                                    <div class="text-sm font-medium text-gray-500 uppercase tracking-wide">Actions Taken</div>
+                                    <div class="text-4xl font-bold text-gray-900 mt-2" x-text="stats.action_count"></div>
+                                </div>
+                                <div class="p-3 bg-yellow-50 rounded-lg text-yellow-600">
+                                    <i class="ph-fill ph-lightning text-xl"></i>
+                                </div>
+                            </div>
+                            <div class="mt-4 text-sm text-gray-600">
+                                Keep the momentum. 
+                                <span x-show="stats.action_count > 0" class="text-brand-600 font-bold">You're active today.</span>
+                                <span x-show="stats.action_count === 0" class="text-gray-400">No activity yet.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        
+                        <!-- Left Col: Chart & Actions -->
+                        <div class="lg:col-span-2 space-y-8">
+                            
+                            <!-- Chart Section -->
+                            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                                <h3 class="font-bold text-gray-900 mb-6 flex items-center gap-2">
+                                    <i class="ph-fill ph-chart-bar text-brand-500"></i>
+                                    Last 7 Days Performance
+                                </h3>
+                                <div class="h-64 w-full">
+                                    <canvas id="weeklyChart"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Actions Grid -->
+                            <div>
+                                <h3 class="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                                    <i class="ph-fill ph-crosshair text-brand-500"></i>
+                                    Execute Protocol
+                                </h3>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <template x-for="action in actions" :key="action.id">
+                                        <button 
+                                            @click="logAction(action)"
+                                            class="flex items-center justify-between p-4 bg-white border border-gray-200 rounded-xl hover:border-brand-300 hover:shadow-md hover:-translate-y-1 transition-all duration-200 group text-left"
+                                        >
+                                            <div class="flex items-center gap-3">
+                                                <div class="w-10 h-10 rounded-full bg-gray-50 flex items-center justify-center text-xl group-hover:bg-brand-50 group-hover:text-brand-600 transition-colors" x-text="action.icon"></div>
+                                                <div>
+                                                    <div class="font-bold text-gray-900 group-hover:text-brand-600 transition-colors" x-text="action.name"></div>
+                                                    <div class="text-xs text-gray-500 capitalize" x-text="action.category"></div>
+                                                </div>
+                                            </div>
+                                            <div class="text-right">
+                                                <div class="font-bold text-brand-600 text-lg">+<span x-text="action.base_points"></span></div>
+                                                <div class="text-[10px] uppercase text-gray-400 font-bold">PTS</div>
+                                            </div>
+                                        </button>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Right Col: Recent History -->
+                        <div class="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col h-full">
+                            <div class="p-4 border-b border-gray-100 flex justify-between items-center">
+                                <h3 class="font-bold text-gray-900">Recent Logs</h3>
+                                <span class="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">Live</span>
+                            </div>
+                            <div class="flex-1 overflow-y-auto p-2 space-y-2 max-h-[500px]">
+                                <template x-for="log in logs" :key="log.id">
+                                    <div class="p-3 hover:bg-gray-50 rounded-lg border border-transparent hover:border-gray-100 transition-colors group">
+                                        <div class="flex justify-between items-start">
+                                            <div class="flex items-center gap-3">
+                                                <span class="text-xl" x-text="log.actions_ref?.icon"></span>
+                                                <div>
+                                                    <div class="text-sm font-semibold text-gray-900" x-text="log.actions_ref?.name"></div>
+                                                    <div class="text-xs text-gray-500" x-text="formatTime(log.created_at)"></div>
+                                                </div>
+                                            </div>
+                                            <div class="flex flex-col items-end gap-1">
+                                                <span class="text-xs font-bold text-brand-600 bg-brand-50 px-2 py-0.5 rounded-full" x-text="`+${log.points_awarded}`"></span>
+                                                <span x-show="log.outcome === 'rejection'" class="text-[10px] font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded">REJECTED</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div x-show="logs.length === 0" class="p-8 text-center text-gray-400 text-sm">
+                                    No actions recorded today.<br>Get to work.
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- PRACTICE TAB (AI Simulator) -->
+                <div x-show="currentTab === 'practice'" class="h-[80vh] flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden" x-cloak>
+                    <div class="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+                        <div>
+                            <h2 class="font-bold text-gray-900 flex items-center gap-2">
+                                <i class="ph-fill ph-robot text-brand-500"></i>
+                                Rejection Simulator
+                            </h2>
+                            <p class="text-xs text-gray-500">Practice your pitch. The AI will try to reject you.</p>
+                        </div>
+                        <button @click="resetSimulation" class="text-xs text-gray-500 hover:text-brand-600 underline">Reset Session</button>
+                    </div>
+                    
+                    <!-- Chat Area -->
+                    <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chatContainer">
+                        <template x-for="msg in simulationMessages" :key="msg.id">
+                            <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+                                <div :class="msg.role === 'user' ? 'bg-brand-600 text-white' : 'bg-gray-100 text-gray-800'" class="max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm">
+                                    <div x-text="msg.text"></div>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="simLoading" class="flex justify-start">
+                            <div class="bg-gray-50 text-gray-400 rounded-2xl px-4 py-2 text-xs italic animate-pulse">
+                                Prospect is typing...
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Input Area -->
+                    <div class="p-4 border-t border-gray-200 bg-white">
+                        <form @submit.prevent="sendSimulationMessage" class="flex gap-2">
+                            <input type="text" x-model="simInput" placeholder="Type your pitch here..." class="flex-1 border border-gray-300 rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+                            <button type="submit" :disabled="simLoading || !simInput.trim()" class="bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white font-bold py-2 px-6 rounded-lg transition-colors">
+                                Send
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- HISTORY TAB (Calendar) -->
+                <div x-show="currentTab === 'history'" class="bg-white p-6 md:p-8 rounded-xl border border-gray-200" x-cloak>
+                    
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-xl md:text-2xl font-bold text-gray-900 flex items-center gap-3">
+                            <i class="ph ph-calendar text-brand-500"></i>
+                            <span x-text="getCalendarTitle()"></span>
+                        </h2>
+                        <div class="flex items-center gap-2 bg-gray-100 rounded-lg p-1">
+                            <button @click="changeMonth(-1)" class="p-2 hover:bg-white rounded-md shadow-sm transition-all text-gray-600 hover:text-brand-600">
+                                <i class="ph ph-caret-left font-bold"></i>
+                            </button>
+                            <button @click="changeMonth(1)" class="p-2 hover:bg-white rounded-md shadow-sm transition-all text-gray-600 hover:text-brand-600">
+                                <i class="ph ph-caret-right font-bold"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Calendar Grid -->
+                    <div class="relative">
+                        <!-- Loading Overlay -->
+                        <div x-show="calendar.loading" class="absolute inset-0 bg-white/80 z-10 flex items-center justify-center backdrop-blur-sm transition-all rounded-xl">
+                            <div class="text-brand-600 animate-spin text-2xl"><i class="ph ph-circle-notch"></i></div>
+                        </div>
+
+                        <!-- Grid -->
+                        <div class="grid grid-cols-7 gap-2 md:gap-4 mb-4">
+                            <!-- Weekday Headers -->
+                            <template x-for="day in ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']">
+                                <div class="text-center text-xs font-bold text-gray-400 uppercase tracking-wider py-2" x-text="day"></div>
+                            </template>
+
+                            <!-- Days -->
+                            <template x-for="(cell, index) in calendar.days" :key="index">
+                                <div 
+                                    @click="!cell.empty && selectDay(cell.dateStr)"
+                                    class="calendar-day relative rounded-xl border flex flex-col items-center justify-center transition-all duration-200 group"
+                                    :class="cell.empty ? 'border-transparent bg-transparent pointer-events-none' : getDayClass(cell.dateStr)"
+                                >
+                                    <template x-if="!cell.empty">
+                                        <div class="w-full h-full flex flex-col items-center justify-center relative">
+                                            <span class="text-sm font-bold" x-text="cell.day"></span>
+                                            
+                                            <!-- Stats for day -->
+                                            <template x-if="calendar.stats[cell.dateStr]">
+                                                <div class="flex flex-col items-center mt-1">
+                                                    <!-- Rejection Dot -->
+                                                    <div x-show="calendar.stats[cell.dateStr].rejection_count > 0" class="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full shadow-sm animate-pulse" title="Rejection Logged"></div>
+                                                    
+                                                    <!-- Points Label (Only if enough space or points > 0) -->
+                                                    <span x-show="calendar.stats[cell.dateStr].total_points > 0" class="text-[10px] opacity-80" x-text="`${calendar.stats[cell.dateStr].total_points}pts`"></span>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                        
+                        <!-- Log List (Detailed History) -->
+                        <div class="mt-8 pt-8 border-t border-gray-100">
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <h3 class="text-lg font-bold text-gray-900 flex items-center gap-2">
+                                            <i class="ph-fill ph-list-dashes text-brand-500"></i>
+                                            <span x-text="selectedDate ? `Logs for ${selectedDate}` : 'All Logs (This Month)'"></span>
+                                        </h3>
+                                        <button 
+                                            x-show="selectedDate" 
+                                            @click="clearDateSelection()" 
+                                            class="bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-full p-1 transition-colors flex items-center justify-center w-6 h-6"
+                                            title="Clear Date Filter"
+                                        >
+                                            <i class="ph-bold ph-x text-xs"></i>
+                                        </button>
+                                    </div>
+                                    <p class="text-sm text-gray-500 mt-1">
+                                        <span x-text="getFilteredHistory().length"></span> entries found
+                                    </p>
+                                </div>
+
+                                <!-- Filter Controls -->
+                                <div class="flex items-center gap-2 bg-gray-50 p-1 rounded-lg border border-gray-100">
+                                    <button 
+                                        @click="filterType = 'all'"
+                                        :class="filterType === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
+                                        class="px-3 py-1.5 text-xs font-medium rounded-md transition-all"
+                                    >All</button>
+                                    <button 
+                                        @click="filterType = 'rejection'"
+                                        :class="filterType === 'rejection' ? 'bg-white text-danger-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
+                                        class="px-3 py-1.5 text-xs font-medium rounded-md transition-all"
+                                    >Rejections</button>
+                                    <button 
+                                        @click="filterType = 'wins'"
+                                        :class="filterType === 'wins' ? 'bg-white text-brand-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
+                                        class="px-3 py-1.5 text-xs font-medium rounded-md transition-all"
+                                    >Wins</button>
+                                </div>
+                            </div>
+
+                            <div class="space-y-2 max-h-[400px] overflow-y-auto pr-2">
+                                <template x-for="log in getFilteredHistory()" :key="log.id">
+                                    <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 flex justify-between items-center group hover:bg-white hover:shadow-sm transition-all">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-lg" x-text="log.actions_ref?.icon"></div>
+                                            <div>
+                                                <div class="text-sm font-semibold text-gray-900" x-text="log.actions_ref?.name"></div>
+                                                <div class="text-xs text-gray-500 flex gap-2">
+                                                    <span x-text="new Date(log.created_at).toLocaleDateString()"></span>
+                                                    <span>•</span>
+                                                    <span x-text="formatTime(log.created_at)"></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-center gap-4">
+                                            <div class="flex flex-col items-end">
+                                                <span class="text-xs font-bold text-brand-600 bg-brand-50 px-2 py-0.5 rounded-full" x-text="`+${log.points_awarded}`"></span>
+                                                <span x-show="log.outcome === 'rejection'" class="text-[10px] font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded">REJECTED</span>
+                                            </div>
+                                            <!-- Delete Button -->
+                                            <button @click="deleteLog(log.id)" class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all p-1" title="Delete Log">
+                                                <i class="ph ph-trash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div x-show="getFilteredHistory().length === 0" class="text-center py-8 text-gray-400 text-sm italic border-2 border-dashed border-gray-100 rounded-xl">
+                                    No logs found for this filter.
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+    </main>
+
+    <!-- TOAST -->
+    <div 
+        x-show="toast.visible" 
+        x-transition:enter="transition ease-out duration-300"
+        x-transition:enter-start="opacity-0 translate-y-8"
+        x-transition:enter-end="opacity-100 translate-y-0"
+        x-transition:leave="transition ease-in duration-200"
+        x-transition:leave-start="opacity-100 translate-y-0"
+        x-transition:leave-end="opacity-0 translate-y-8"
+        class="fixed bottom-6 right-6 z-50 bg-gray-900 text-white px-6 py-4 rounded-lg shadow-xl flex items-center gap-3"
+    >
+        <div class="p-1 bg-green-500 rounded-full">
+            <i class="ph-bold ph-check text-white text-xs"></i>
+        </div>
+        <span x-text="toast.message" class="font-medium text-sm"></span>
+    </div>
+</body>
+</html>
